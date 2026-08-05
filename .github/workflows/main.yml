@@ -10,12 +10,11 @@ jobs:
   build-application:
     runs-on: ubuntu-latest
     steps:
-      - name: Load config (webhook overrides, else defaults)
+      - name: Load config
         run: |
           echo "BRANCH=${{ github.event.client_payload.branch || 'main' }}" >> $GITHUB_ENV
           echo "ARTIFACT_PATH=${{ github.event.client_payload.artifact_path || 'dist' }}" >> $GITHUB_ENV
           echo "RETAIN_COUNT=${{ github.event.client_payload.retain_count || '5' }}" >> $GITHUB_ENV
-          # boolean-ish fields: pass raw, resolve properly in bash later
           echo "CREATE_RELEASE_INPUT=${{ github.event.client_payload.create_release }}" >> $GITHUB_ENV
 
       - name: Fetch source (quiet)
@@ -33,40 +32,79 @@ jobs:
           R2_ACCESS_KEY: ${{ secrets.R2_ACCESS_KEY }}
           R2_SECRET_KEY: ${{ secrets.R2_SECRET_KEY }}
           R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
-          VAULT_PAT: ${{ secrets.VAULT_PAT }}
         run: |
           cd src
           chmod +x ./build.sh
           ./build.sh > ../build_logs.txt 2>&1
           cd ..
-          # build.sh can drop a manifest to override defaults
           if [ -f src/build_manifest.env ]; then
             cat src/build_manifest.env >> $GITHUB_ENV
           fi
 
-      - name: Create default release (skippable by build.sh)
+      - name: Create release (skippable by build.sh)
         if: env.CREATE_RELEASE_INPUT != 'false' && env.SKIP_RELEASE != 'true'
         env:
-          GITHUB_TOKEN: ${{ secrets.VAULT_PAT }}
+          VAULT_PAT: ${{ secrets.VAULT_PAT }}
         run: |
+          set +x
+          echo "::add-mask::$VAULT_PAT"
+
           TAG_NAME="build-$(date +'%Y%m%d-%H%M%S')"
+          echo "TAG_NAME=$TAG_NAME" >> $GITHUB_ENV
+
           TARGET="${ARTIFACT_PATH:-dist}"
           if [ -d "src/$TARGET" ]; then
-            zip -r release-artifacts.zip "src/$TARGET"
+            zip -rq release-artifacts.zip "src/$TARGET"
             UPLOAD_FILE="release-artifacts.zip"
           else
             UPLOAD_FILE="src/$TARGET"
           fi
-          gh release create "$TAG_NAME" "$UPLOAD_FILE" build_logs.txt \
-            --repo liebertjohan-art/build-vault --title "Build $TAG_NAME"
+
+          RELEASE_RESPONSE=$(curl -s -X POST \
+            -H "Authorization: token $VAULT_PAT" \
+            -H "Accept: application/vnd.github.v3+json" \
+            https://api.github.com/repos/liebertjohan-art/artifacts/releases \
+            -d "{\"tag_name\":\"$TAG_NAME\",\"name\":\"Build $TAG_NAME\"}")
+
+          UPLOAD_URL=$(echo "$RELEASE_RESPONSE" | jq -r '.upload_url' | sed 's/{.*//')
+
+          if [ -z "$UPLOAD_URL" ] || [ "$UPLOAD_URL" = "null" ]; then
+            echo "Release creation failed"
+            exit 1
+          fi
+
+          curl -s -X POST \
+            -H "Authorization: token $VAULT_PAT" \
+            -H "Content-Type: application/zip" \
+            --data-binary @"$UPLOAD_FILE" \
+            "$UPLOAD_URL?name=$(basename $UPLOAD_FILE)" > /dev/null
+
+          curl -s -X POST \
+            -H "Authorization: token $VAULT_PAT" \
+            -H "Content-Type: text/plain" \
+            --data-binary @build_logs.txt \
+            "$UPLOAD_URL?name=build_logs.txt" > /dev/null
 
       - name: Cleanup old releases
         if: env.CREATE_RELEASE_INPUT != 'false' && env.SKIP_RELEASE != 'true'
         env:
-          GITHUB_TOKEN: ${{ secrets.VAULT_PAT }}
+          VAULT_PAT: ${{ secrets.VAULT_PAT }}
         run: |
-          gh api "repos/liebertjohan-art/build-vault/releases" -q ".[${RETAIN_COUNT}:] | .[].tag_name" | while read -r tag; do
-            [ -n "$tag" ] && gh release delete "$tag" --repo liebertjohan-art/build-vault -y --cleanup-tag
+          set +x
+          echo "::add-mask::$VAULT_PAT"
+
+          RELEASES=$(curl -s -H "Authorization: token $VAULT_PAT" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/liebertjohan-art/artifacts/releases")
+
+          echo "$RELEASES" | jq -r ".[${RETAIN_COUNT}:] | .[] | \"\(.id) \(.tag_name)\"" | while read -r id tag; do
+            [ -z "$id" ] && continue
+            curl -s -X DELETE \
+              -H "Authorization: token $VAULT_PAT" \
+              "https://api.github.com/repos/liebertjohan-art/artifacts/releases/$id" > /dev/null
+            curl -s -X DELETE \
+              -H "Authorization: token $VAULT_PAT" \
+              "https://api.github.com/repos/liebertjohan-art/artifacts/git/refs/tags/$tag" > /dev/null
           done
 
       - name: Notify worker
@@ -75,7 +113,13 @@ jobs:
           WORKER_URL: ${{ secrets.WORKER_URL }}
           WORKER_AUTH: ${{ secrets.WORKER_AUTH }}
         run: |
+          set +x
+          echo "::add-mask::$WORKER_AUTH"
+
+          STATUS="${{ job.status }}"
+          TAG="${TAG_NAME:-failed-build}"
+
           curl -s -X POST "$WORKER_URL/notify" \
-          -H "Content-Type: application/json" \
-          -H "X-Secret-Auth: $WORKER_AUTH" \
-          -d "{\"status\": \"${{ job.status }}\"}"
+            -H "Content-Type: application/json" \
+            -H "X-Secret-Auth: $WORKER_AUTH" \
+            -d "{\"status\": \"$STATUS\", \"tag\": \"$TAG\"}" > /dev/null
