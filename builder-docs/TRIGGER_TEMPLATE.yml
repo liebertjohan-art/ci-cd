@@ -1,0 +1,48 @@
+name: Trigger Remote Build
+
+on:
+  push:
+    branches:
+      - main # Change this to the branch you want to trigger builds from
+
+jobs:
+  trigger-builder:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Build via Webhook
+        env:
+          # Hardcoded Worker URL (Replace with actual Production Worker URL)
+          WORKER_URL: "https://your-worker-url.workers.dev/build" 
+          # GitHub SECRETS that must be added to THIS private repository
+          WORKER_AUTH: ${{ secrets.WORKER_AUTH }} 
+        run: |
+          echo "Triggering external private builder..."
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "$WORKER_URL" \
+            -H "X-Secret-Auth: $WORKER_AUTH" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "repo": "${{ github.repository }}",
+              "branch": "${{ github.ref_name }}",
+              "build_type": "android-gradle",
+              "artifact_path": "app/build/outputs/apk/release",
+              "create_release": true,
+              "retain_count": 5
+            }')
+            
+          HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+          BODY=$(echo "$RESPONSE" | sed '$d')
+          
+          if [ "$HTTP_CODE" -ne 200 ]; then
+            echo "Failed to trigger build: HTTP $HTTP_CODE"
+            echo "Response: $BODY"
+            exit 1
+          fi
+          
+          echo "Successfully triggered build!"
+          echo "Response: $BODY"
+
+          # NOTE REGARDING PAYLOAD OPTIONS:
+          # build_type options: "android-gradle", "ndk-cmake", "node", "nextjs", or "custom"
+          # artifact_path: directory inside your repo containing files you want zipped up and bundled. 
+          # Optionally you can add toolchain versions:
+          # "node_version": "20", "java_version": "17", "java_distro": "temurin", "ndk_version": "r26d"
