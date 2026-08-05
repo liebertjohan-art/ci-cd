@@ -17,26 +17,32 @@ jobs:
           echo "RETAIN_COUNT=${{ github.event.client_payload.retain_count || '5' }}" >> $GITHUB_ENV
           echo "CREATE_RELEASE_INPUT=${{ github.event.client_payload.create_release }}" >> $GITHUB_ENV
           echo "BUILD_TYPE=${{ github.event.client_payload.build_type || 'custom' }}" >> $GITHUB_ENV
+          
+          # Dynamic toolchain versions from payload (with secure defaults)
+          echo "NODE_VERSION=${{ github.event.client_payload.node_version || '20' }}" >> $GITHUB_ENV
+          echo "JAVA_VERSION=${{ github.event.client_payload.java_version || '17' }}" >> $GITHUB_ENV
+          echo "JAVA_DISTRO=${{ github.event.client_payload.java_distro || 'temurin' }}" >> $GITHUB_ENV
+          echo "NDK_VERSION=${{ github.event.client_payload.ndk_version || 'r26d' }}" >> $GITHUB_ENV
 
       # --- CONDITIONAL TOOLCHAINS ---
       - name: Setup Node.js
         if: env.BUILD_TYPE == 'node' || env.BUILD_TYPE == 'nextjs'
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: ${{ env.NODE_VERSION }}
 
       - name: Setup Java/Android
         if: env.BUILD_TYPE == 'android-gradle'
         uses: actions/setup-java@v4
         with:
-          distribution: 'temurin'
-          java-version: '17'
+          distribution: ${{ env.JAVA_DISTRO }}
+          java-version: ${{ env.JAVA_VERSION }}
           
       - name: Setup NDK
         if: env.BUILD_TYPE == 'ndk-cmake'
         uses: nttld/setup-ndk@v1
         with:
-          ndk-version: r26d
+          ndk-version: ${{ env.NDK_VERSION }}
 
       - name: Fetch source (quiet)
         env:
