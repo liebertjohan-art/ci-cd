@@ -16,6 +16,27 @@ jobs:
           echo "ARTIFACT_PATH=${{ github.event.client_payload.artifact_path || 'dist' }}" >> $GITHUB_ENV
           echo "RETAIN_COUNT=${{ github.event.client_payload.retain_count || '5' }}" >> $GITHUB_ENV
           echo "CREATE_RELEASE_INPUT=${{ github.event.client_payload.create_release }}" >> $GITHUB_ENV
+          echo "BUILD_TYPE=${{ github.event.client_payload.build_type || 'custom' }}" >> $GITHUB_ENV
+
+      # --- CONDITIONAL TOOLCHAINS ---
+      - name: Setup Node.js
+        if: env.BUILD_TYPE == 'node' || env.BUILD_TYPE == 'nextjs'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Setup Java/Android
+        if: env.BUILD_TYPE == 'android-gradle'
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+          
+      - name: Setup NDK
+        if: env.BUILD_TYPE == 'ndk-cmake'
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r26d
 
       - name: Fetch source (quiet)
         env:
@@ -24,8 +45,40 @@ jobs:
         run: |
           set +x
           echo "::add-mask::$TOKEN"
+          if [ -z "$SOURCE_REPO" ]; then
+            echo "Error: SOURCE_REPO is not defined."
+            exit 1
+          fi
           git clone --quiet --depth 1 --branch "$BRANCH" \
             "https://x-access-token:${TOKEN}@github.com/${SOURCE_REPO}.git" src 2>/dev/null
+
+      # --- CACHING ---
+      - name: Cache Gradle (Android)
+        if: env.BUILD_TYPE == 'android-gradle'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ github.event.client_payload.source_repo }}-${{ hashFiles('src/**/*.gradle*', 'src/**/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-${{ github.event.client_payload.source_repo }}-
+
+      - name: Cache Node Modules
+        if: env.BUILD_TYPE == 'node' || env.BUILD_TYPE == 'nextjs'
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-node-${{ github.event.client_payload.source_repo }}-${{ hashFiles('src/**/package-lock.json', 'src/**/yarn.lock', 'src/**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-node-${{ github.event.client_payload.source_repo }}-
+
+      - name: Verify Prerequisite
+        run: |
+          if [ ! -f "src/build.sh" ]; then
+            echo "Error: build.sh is missing in the repository root"
+            exit 1
+          fi
 
       - name: Execute build (build.sh has full control)
         env:
@@ -48,14 +101,16 @@ jobs:
         run: |
           set +x
           echo "::add-mask::$VAULT_PAT"
+          
+          sudo apt-get install -y pigz > /dev/null 2>&1
 
           TAG_NAME="build-$(date +'%Y%m%d-%H%M%S')"
           echo "TAG_NAME=$TAG_NAME" >> $GITHUB_ENV
 
           TARGET="${ARTIFACT_PATH:-dist}"
           if [ -d "src/$TARGET" ]; then
-            zip -rq release-artifacts.zip "src/$TARGET"
-            UPLOAD_FILE="release-artifacts.zip"
+            tar -I pigz -cf release-artifacts.tar.gz -C src "$TARGET"
+            UPLOAD_FILE="release-artifacts.tar.gz"
           else
             UPLOAD_FILE="src/$TARGET"
           fi
@@ -73,9 +128,14 @@ jobs:
             exit 1
           fi
 
+          MIME_TYPE="application/gzip"
+          if [[ "$UPLOAD_FILE" != *.tar.gz ]]; then
+            MIME_TYPE="application/octet-stream"
+          fi
+
           curl -s -X POST \
             -H "Authorization: token $VAULT_PAT" \
-            -H "Content-Type: application/zip" \
+            -H "Content-Type: $MIME_TYPE" \
             --data-binary @"$UPLOAD_FILE" \
             "$UPLOAD_URL?name=$(basename $UPLOAD_FILE)" > /dev/null
 
