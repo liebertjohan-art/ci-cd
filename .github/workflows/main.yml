@@ -87,7 +87,6 @@ jobs:
           fi
 
       - name: Execute build (build.sh has full control)
-        env:
         run: |
           cd src
           chmod +x ./build.sh
